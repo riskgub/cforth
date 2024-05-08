@@ -14,26 +14,7 @@ typedef uint64_t ucell;
 #define OP_EXIT 0x04
 #define OP_EXECUTE 0x05
 #define OP_LITERAL 0x06
-#define OP_TO_R 0x08
-#define OP_R_TO 0x09
-#define OP_R_FETCH 0x0A
-#define OP_PLUS  0x10
-#define OP_MINUS 0x11
-#define OP_AND   0x12
-#define OP_OR    0x13
-#define OP_XOR   0x14
-#define OP_LSHIFT 0x15
-#define OP_RSHIFT 0x16
-#define OP_INVERT 0x17
-#define OP_DUP   0x20
-#define OP_DROP  0x21
-#define OP_SWAP  0x22
-#define OP_OVER  0x23
-#define OP_CFETCH 0x30
-#define OP_FETCH  0x31
-#define OP_CSTORE 0x38
-#define OP_STORE  0x39
-#define OP_LESS_THAN_ZERO 0x40
+#define OP_C_CALL 0x07
 
 cell stack[256];
 cell rstack[256];
@@ -126,11 +107,9 @@ void call ( cell addr, int offset )
   rpush( (cell)(ip + offset));
   ip = (char*)addr;
   char running = 1;
-  printf("ip: %X\n", ip);
-  unsigned char op = *(ip++);
-  printf("op: %X\n", op);
   while ( running )
   {
+    unsigned char op = *(ip++);
     cell a;
     cell b;
     switch ( op )
@@ -146,48 +125,12 @@ void call ( cell addr, int offset )
           ip += sizeof( cell );
       case OP_CALL:  fetch( ip ); call( pop(), sizeof( cell ) ); break;
       case OP_EXIT:  semicolon(); running = 0; break;
-      case OP_LITERAL:  fetch( (cell)ip ); ip += sizeof( cell ); break;
+      case OP_LITERAL:  push( *((cell*)ip) ); ip += sizeof( cell ); break;
       case OP_EXECUTE: call( pop(), 0 ); break;
-      case OP_TO_R:  rpush( pop() ); break;
-      case OP_R_TO:  push( rpop() ); break;
-      case OP_R_FETCH:  push( *rp ); break;
-      case OP_PLUS: push( pop() + pop() ); break;
-      case OP_MINUS:
-        b = pop();
-        a = pop();
-        push( a - b );
+      case OP_C_CALL: 
+        ((void (*)()) *(cell *) ip)(); 
+        ip += sizeof(cell); 
         break;
-      case OP_AND: push( pop() & pop() ); break;
-      case OP_OR:  push( pop() | pop() ); break;
-      case OP_XOR: push( pop() ^ pop() ); break;
-      case OP_LSHIFT:
-        b = pop();
-        a = pop();
-        push( a << b );
-        break;
-      case OP_RSHIFT:
-        b = pop();
-        a = pop();
-        push( a >> b );
-        break;
-      case OP_INVERT: push( ~pop() ); break;
-      case OP_DUP: dup(); break;
-      case OP_DROP: drop(); break;
-      case OP_SWAP: swap(); break;
-      case OP_OVER: over(); break;
-      case OP_CFETCH:  cfetch( pop() ); break;
-      case OP_FETCH:   fetch( pop() ); break;
-      case OP_CSTORE:
-        b = pop();
-        a = pop();
-        cstore( a, b );
-        break;
-      case OP_STORE:
-        b = pop();
-        a = pop();
-        store( a, b );
-        break;
-      case OP_LESS_THAN_ZERO: push( pop() < 0 ? -1 : 0 ); break;
       default: semicolon(); running = 0;
     }
   }
@@ -298,9 +241,9 @@ void header_comma ( )
 
 char* link_to_xt ( cell* link )
 {
+
   char* c_addr = (char*)(link+1)+2;
   unsigned char len = *c_addr;
-  printf("len: %X\n", len);
   return c_addr + len + 1;
 }
 
@@ -375,6 +318,11 @@ void accept ( )
   push(l);
 }
 
+void emit ( )
+{
+  putchar( pop() );
+}
+
 void bye ( )
 {
   exit( 1 );
@@ -406,6 +354,22 @@ void literal ( cell x )
   comma();
 }
 
+void c_call ( void* func )
+{
+  push( OP_C_CALL );
+  c_comma();
+  push( (cell)func );
+  comma();
+}
+
+void print_stack ( )
+{
+  ucell sdepth = ((ucell)(&stack[255]) - (ucell)sp) / sizeof(ucell); 
+  printf("<%i> ",sdepth);
+  for ( ucell i = 0; i < sdepth; i++ )
+    printf("%i ", stack[255-i] );
+}
+
 #define HEADER(c,u) push((cell)c);push(u);header_comma();
 #define EXIT push(OP_EXIT);c_comma();
 
@@ -413,20 +377,30 @@ void init_dictionary ( )
 {
   latest = 0;
   HEADER("DUP",3)
-  push( OP_DUP );
-  c_comma();
+  c_call( dup );
   EXIT
 
-  HEADER("123",3)
-  literal(123);
+  HEADER("A",1)
+  literal('A');
   EXIT
 
-  HEADER("[",1)
-  literal( 0 );
-  literal( (cell)state );
-  push( OP_STORE );
-  c_comma();
+  HEADER("EMIT",4)
+  c_call( emit );
   EXIT
+
+  HEADER(".S",2)
+  c_call( print_stack );
+  EXIT
+
+  HEADER("CHAR",4)
+  c_call( parse_name );
+  c_call( drop );
+  c_call( cfetch );
+  EXIT
+
+  HEADER("BYE", 3)
+  c_call( bye ); 
+
 }
 
 int main ( )
@@ -436,32 +410,42 @@ int main ( )
   rp = &rstack[255];
   dp = memory;
   init_dictionary();
+  char success = 0;
   while ( 1 )
-  {
+  { 
     refill();
     drop();
-    parse_name();
-    sfind();
-    cell flag = pop();
-    cell xt = pop();
-    if ( flag != 0 )
+    ucell word_len = 1;
+    while ( word_len )
     {
-      push( xt );
-      if ( flag == 1 || ( flag == -1 && state == 0 )  )
+      parse_name();
+      dup();
+      word_len = pop();
+      sfind();
+      cell flag = pop();
+      cell xt = pop();
+      if ( flag != 0 )
       {
-        execute();
+        push( xt );
+        if ( flag == 1 || ( flag == -1 && state == 0 )  )
+        {
+          execute();
+        }
+        else 
+        {
+          if ( state )
+            compile_comma();
+        }
+        success = 1;
       }
       else 
       {
-        if ( state )
-          compile_comma();
+        puts("Undefined word");
+        success = 0;
       }
+    }
+    if ( success )
       puts("ok.");
-    }
-    else 
-    {
-      puts("Undefined word");
-    }
   }
   return 1;
 }
